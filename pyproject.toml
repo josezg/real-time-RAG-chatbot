@@ -1,0 +1,19 @@
+[project]
+name = "real-time-rag-chatbot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bitsandbytes>=0.45.5",
+    "chromadb>=1.0.9",
+    "ipykernel>=6.29.5",
+    "llama-index>=0.12.37",
+    "llama-index-embeddings-huggingface>=0.5.4",
+    "llama-index-llms-huggingface>=0.5.0",
+    "llama-index-vector-stores-chroma>=0.4.1",
+    "pypdf>=5.5.0",
+    "sentence-transformers>=4.1.0",
+    "transformers>=4.52.1",
+    "watchdog>=6.0.0",
+]
