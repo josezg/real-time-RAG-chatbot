@@ -7,4 +7,3 @@ class EmbeddingModel:
         Chunk size will be set globally via LlamaIndex Settings.
         """
         self.embed_model = HuggingFaceEmbedding(model_name=model_name)
-        # self.chunk_size is removed here as it's a global setting now

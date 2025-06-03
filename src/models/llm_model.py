@@ -8,8 +8,6 @@ class LLMModel:
 
     def _initialize_llm(self):
         try:
-            # Note: For Mistral/Llama 2, consider context_window=4096 or 8192
-            # and max_new_tokens for your GPU VRAM
             bnb_config = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
@@ -17,8 +15,8 @@ class LLMModel:
                 bnb_4bit_use_double_quant=True,
             )
             llm = HuggingFaceLLM(
-                model_name="microsoft/phi-2", # Consider "mistralai/Mistral-7B-Instruct-v0.2" here
-                tokenizer_name="microsoft/phi-2", # Corresponding tokenizer name
+                model_name="microsoft/phi-2",
+                tokenizer_name="microsoft/phi-2",
                 context_window=2048,
                 max_new_tokens=128,
                 device_map="auto",

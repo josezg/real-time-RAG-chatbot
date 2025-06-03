@@ -6,14 +6,14 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 import datetime # For displaying file modification time
 import pandas as pd # For presenting file info in a table
-import threading # Still needed for watchdog thread
+import threading
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
 # Import your custom modules
 from models.llm_model import LLMModel
 from models.embedding_model import EmbeddingModel
-from storage.document_processing import DocumentProcessingPipeline
+from src.storage.document_processor import DocumentProcessor
 from llama_index.core import Settings # Crucial import for LlamaIndex global settings
 
 # --- Streamlit App Setup ---
@@ -30,7 +30,7 @@ if "observer" not in st.session_state:
     st.session_state.observer = None
 if "document_processor" not in st.session_state:
     st.session_state.document_processor = None
-if "root_dir_input" not in st.session_state: # Renamed for clarity: this is the root path
+if "root_dir_input" not in st.session_state:
     st.session_state.root_dir_input = ""
 if "query_input" not in st.session_state:
     st.session_state.query_input = ""
@@ -42,8 +42,6 @@ if "documents_list" not in st.session_state: # Stores the list of documents for 
     st.session_state.documents_list = []
 if "documents_subdir_path" not in st.session_state: # Store actual documents path
     st.session_state.documents_subdir_path = None
-# Removed: if "script_run_context" not in st.session_state:
-# Removed: st.session_state.script_run_context = None
 
 
 # --- Model Loading (Cached) ---
@@ -78,7 +76,6 @@ def get_documents_info(docs_path: Path):
             if f.is_file(): # Only list actual files, not subdirectories
                 try:
                     file_size_bytes = f.stat().st_size
-                    # Convert to human-readable format
                     if file_size_bytes < 1024:
                         file_size = f"{file_size_bytes} B"
                     elif file_size_bytes < 1024**2:
@@ -100,11 +97,9 @@ def get_documents_info(docs_path: Path):
 
 # --- Watchdog Event Handler ---
 class StreamlitDocumentEventHandler(FileSystemEventHandler):
-    # Removed: context: ScriptRunContext from __init__ signature
-    def __init__(self, processor_instance: DocumentProcessingPipeline, docs_path_for_display: Path):
+    def __init__(self, processor_instance: DocumentProcessor, docs_path_for_display: Path):
         self.processor = processor_instance
         self.docs_path_for_display = docs_path_for_display
-        # Removed: self.context = context
 
     def _reindex_documents(self, event_path):
         """
@@ -116,10 +111,6 @@ class StreamlitDocumentEventHandler(FileSystemEventHandler):
         st.session_state.documents_list = get_documents_info(self.docs_path_for_display)
 
         # Trigger Streamlit rerun directly
-        # Note: Calling st.rerun() from a background thread is generally discouraged
-        # by Streamlit as it can lead to less stable behavior compared to using
-        # Streamlit's internal script_run_context. However, this is done as per request
-        # to remove the script_run_context logic.
         st.rerun()
 
     def on_modified(self, event):
@@ -145,12 +136,6 @@ root_directory_input = st.text_input(
     value=st.session_state.root_dir_input,
     placeholder="e.g., /home/user/my_project"
 )
-
-# Removed: Capture the script run context at the start of the Streamlit script
-# Removed: current_script_context = get_script_run_context()
-# Removed: if current_script_context and st.session_state.script_run_context is None:
-# Removed: st.session_state.script_run_context = current_script_context
-
 
 # Use a button to trigger directory processing
 if st.button("Process Directory") and root_directory_input:
@@ -198,7 +183,7 @@ if st.button("Process Directory") and root_directory_input:
                     st.session_state.observer = None # Clear observer from session state
 
                 # Initialize DocumentProcessingPipeline for the new directory
-                st.session_state.document_processor = DocumentProcessingPipeline(
+                st.session_state.document_processor = DocumentProcessor(
                     docs_dir=str(documents_subdir_path), # Pass the actual documents path
                     persist_dir=str(chroma_db_subdir_path)
                 )
@@ -219,9 +204,6 @@ if st.button("Process Directory") and root_directory_input:
                 st.session_state.is_setup_complete = True
                 st.session_state.documents_list = current_files_info # Populate list after indexing
                 st.success("Setup complete! You can now ask questions.")
-                # No need for st.rerun() here as the button click already triggers a rerun.
-                # The _reindex_documents in the event handler will handle subsequent reruns.
-
 
 # --- Display Document List ---
 st.markdown("### Documents in Folder")
@@ -271,12 +253,6 @@ else:
             with st.chat_message("assistant"):
                 st.error(error_msg)
 
-# --- Clean up observer on app shutdown/rerun (best effort) ---
-# This is a bit tricky with Streamlit's stateless nature.
-# The observer is a daemon thread, so it might not stop cleanly on simple app refresh.
-# It's more reliable when the Streamlit server itself is stopped.
-# For robustness, you might need a more sophisticated process management.
-
 # Footer
 st.markdown("---")
-st.markdown("Developed by Jose. Powered by Streamlit and LlamaIndex.")
+st.markdown("Powered by Streamlit and LlamaIndex.")

@@ -8,7 +8,7 @@ from llama_index.vector_stores.chroma import ChromaVectorStore
 import chromadb
 from llama_index.core.prompts import PromptTemplate
 
-class DocumentProcessingPipeline:
+class DocumentProcessor:
     def __init__(self, docs_dir: str, persist_dir: str):
         self.docs_dir = Path(docs_dir)
         self.persist_dir = Path(persist_dir)
@@ -41,7 +41,6 @@ class DocumentProcessingPipeline:
 
     def index_documents(self):
         print(f"Loading documents from {self.docs_dir}...")
-        # SimpleDirectoryReader will automatically use LlamaIndex's global Settings.embed_model
         documents = SimpleDirectoryReader(str(self.docs_dir)).load_data()
         print(f"Found {len(documents)} documents.")
 
@@ -51,10 +50,8 @@ class DocumentProcessingPipeline:
                 documents,
                 storage_context=self.storage_context,
                 show_progress=True,
-                # No need to pass embed_model here if Settings.embed_model is set globally
             )
             self.query_engine = self.index.as_query_engine(
-                # No need to pass llm or embed_model here if Settings are set globally
                 response_mode="compact",
                 text_qa_template=self.qa_tmpl,
                 verbose=True
