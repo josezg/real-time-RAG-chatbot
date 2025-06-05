@@ -1,3 +1,0 @@
-AI agents can encompass a wide range of functionalities beyond natural language processing including decision-making, problem-solving, interacting with external environments and executing actions.
-
-These agents can be deployed in various applications to solve complex tasks in various enterprise contexts from software design and IT automation to code-generation tools and conversational assistants. They use the advanced natural language processing techniques of large language models (LLMs) to comprehend and respond to user inputs step-by-step and determine when to call on external tools.
