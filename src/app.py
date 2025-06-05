@@ -2,12 +2,9 @@ import streamlit as st
 import os
 import sys
 from pathlib import Path
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 import datetime # For displaying file modification time
 import pandas as pd # For presenting file info in a table
-import threading
-import time # Needed for the debounce mechanism and polling
+import time # Needed for timestamps and showing 'recently indexed' status
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
@@ -18,16 +15,14 @@ from storage.document_processor import DocumentProcessor
 from llama_index.core import Settings # Crucial import for LlamaIndex global settings
 
 # --- Streamlit App Setup ---
-st.set_page_config(page_title="Real-Time RAG Chatbot", layout="wide")
-st.title("Real-Time RAG Chatbot")
+st.set_page_config(page_title="Real-Time RAG Local Chatbot", layout="wide")
+st.title("Real-Time RAG Local Chatbot")
 st.markdown("""
-Welcome to the Real-Time RAG Chatbot!
+Welcome to the Real-Time RAG Local Chatbot!
 Type your question below and get instant responses powered by Retrieval-Augmented Generation.
 """)
 
 # --- Constants & Session State Initialization ---
-if "observer" not in st.session_state:
-    st.session_state.observer = None
 if "document_processor" not in st.session_state:
     st.session_state.document_processor = None
 if "root_dir_input" not in st.session_state:
@@ -42,12 +37,17 @@ if "documents_subdir_path" not in st.session_state:
     st.session_state.documents_subdir_path = None
 if "is_reindexing" not in st.session_state:
     st.session_state.is_reindexing = False
-if "file_change_detected" not in st.session_state: # Flag set by watchdog thread
-    st.session_state.file_change_detected = False
+if "reindex_required" not in st.session_state:
+    st.session_state.reindex_required = False
 if "last_reindex_time" not in st.session_state:
     st.session_state.last_reindex_time = 0.0 # Use float for time.time()
 if "initial_indexing_done" not in st.session_state:
     st.session_state.initial_indexing_done = False
+# Snapshot of files at last successful indexing
+if "indexed_files_snapshot" not in st.session_state:
+    st.session_state.indexed_files_snapshot = []
+if "timed_message_info" not in st.session_state:
+    st.session_state.timed_message_info = {"message": "", "type": "", "display_until": 0.0}
 
 
 # --- Model Loading (Cached) ---
@@ -60,7 +60,7 @@ def load_llm_model():
 @st.cache_resource
 def load_embedding_model():
     """Loads and caches the embedding model."""
-    embed_model_instance = EmbeddingModel() # Corrected class name
+    embed_model_instance = EmbeddingModel()
     return embed_model_instance.embed_model
 
 # Load models and set LlamaIndex global settings
@@ -71,10 +71,10 @@ Settings.llm = llm_instance
 Settings.embed_model = embed_model_instance
 Settings.chunk_size = 256 # Set your desired chunk size here globally
 
-# --- Helper function to get document info ---
+# --- Helper function to get document info and snapshot ---
 def get_documents_info(docs_path: Path):
     """
-    Scans the documents directory and returns a list of file info.
+    Scans the documents directory and returns a list of file info for display.
     """
     files_info = []
     if docs_path.is_dir():
@@ -103,60 +103,51 @@ def get_documents_info(docs_path: Path):
                     print(f"Could not get info for {f.name}: {e}")
     return files_info
 
-# --- Watchdog Event Handler (Modified for Streamlit Communication) ---
-class SmartDocumentEventHandler(FileSystemEventHandler):
-    def __init__(self, docs_path: Path):
-        self.docs_path = docs_path
-        self.debounce_time = 0.000001  # Seconds to wait before signaling Streamlit
-        self._last_event_time = 0.0 # To track when the last event was handled
-        self._lock = threading.Lock() # To protect _last_event_time
+def get_file_snapshot(docs_path: Path):
+    """
+    Returns a consistent snapshot of files (path, modification_time) for comparison.
+    """
+    snapshot = []
+    if docs_path.is_dir():
+        for f in docs_path.iterdir():
+            if f.is_file() and f.suffix.lower() in ['.txt', '.pdf', '.docx', '.md']:
+                try:
+                    snapshot.append((str(f.absolute()), f.stat().st_mtime))
+                except Exception as e:
+                    print(f"Could not get snapshot for {f.name}: {e}")
+    return sorted(snapshot) # Sort for consistent comparison
 
-    def _trigger_reindex_flag(self, event_path):
-        """
-        Sets a flag in st.session_state to indicate a file change,
-        with a debounce mechanism. This flag is then picked up by the main Streamlit thread.
-        """
-        current_time = time.time()
-        with self._lock:
-            # Only set the flag if enough time has passed since the last event
-            if (current_time - self._last_event_time) < self.debounce_time:
-                print(f"Debouncing event for {event_path}. Last event was too recent. Skipping signal.")
-                return
-            self._last_event_time = current_time
+def has_directory_changed(current_docs_path: Path):
+    """
+    Compares the current directory state with the last indexed snapshot.
+    Returns True if changes are detected, False otherwise.
+    """
+    if not st.session_state.is_setup_complete or not st.session_state.documents_subdir_path:
+        return False # Cannot detect changes if not set up
 
-        print(f"Watchdog: File change detected in {event_path}. Setting file_change_detected flag.")
-        st.session_state.file_change_detected = True
+    current_snapshot = get_file_snapshot(current_docs_path)
+    # If the stored snapshot is empty, and current is not, it's a change (e.g., first files added)
+    if not st.session_state.indexed_files_snapshot and current_snapshot:
+        return True
+        
+    return current_snapshot != st.session_state.indexed_files_snapshot
 
-    def on_created(self, event):
-        if not event.is_directory and Path(event.src_path).suffix.lower() in ['.txt', '.pdf', '.docx', '.md']:
-            self._trigger_reindex_flag(event.src_path)
-
-    def on_modified(self, event):
-        if not event.is_directory and Path(event.src_path).suffix.lower() in ['.txt', '.pdf', '.docx', '.md']:
-            self._trigger_reindex_flag(event.src_path)
-
-    def on_deleted(self, event):
-        if not event.is_directory and Path(event.src_path).suffix.lower() in ['.txt', '.pdf', '.docx', '.md']:
-            self._trigger_reindex_flag(event.src_path)
-
-    def on_moved(self, event):
-        # Trigger if source or destination is a document file
-        if not event.is_directory and (Path(event.src_path).suffix.lower() in ['.txt', '.pdf', '.docx', '.md'] or
-                                      Path(event.dest_path).suffix.lower() in ['.txt', '.pdf', '.docx', '.md']):
-            self._trigger_reindex_flag(event.src_path)
 
 # --- Reindexing Logic (called from main Streamlit thread) ---
-def perform_reindexing():
+def perform_reindexing(source_trigger="manual"):
     """Performs the actual reindexing operation and updates UI state."""
-    # Ensure all session_state variables are initialized before access
-    # This function should only be called after initial setup, where these are guaranteed.
     if st.session_state.document_processor is None or st.session_state.documents_subdir_path is None:
         print("Error: Document processor or subdirectory path not initialized for reindexing.")
-        st.error("Error: Please process the directory first before attempting reindexing.")
+        # Store message for timed display
+        st.session_state.timed_message_info = {
+            "message": "Error: Please process the directory first before attempting reindexing.",
+            "type": "error",
+            "display_until": time.time() + 5 # Display for 5 seconds
+        }
         return False
 
     st.session_state.is_reindexing = True
-    print("Starting reindexing process in main Streamlit thread...")
+    print(f"Starting reindexing process in main Streamlit thread (Trigger: {source_trigger})...")
     
     try:
         # Display a spinner in the UI while reindexing
@@ -167,48 +158,74 @@ def perform_reindexing():
         new_docs_info = get_documents_info(st.session_state.documents_subdir_path)
         st.session_state.documents_list = new_docs_info
         st.session_state.last_reindex_time = time.time()
+        # Update the file snapshot after successful reindexing
+        st.session_state.indexed_files_snapshot = get_file_snapshot(st.session_state.documents_subdir_path)
         
         print("Reindexing completed successfully.")
+        # Store message for timed display
+        st.session_state.timed_message_info = {
+            "message": "Documents re-indexed successfully!",
+            "type": "success",
+            "display_until": time.time() + 5 # Display for 5 seconds
+        }
         return True
         
     except Exception as e:
         print(f"Error during reindexing: {e}")
-        st.error(f"Error during reindexing: {e}")
+        # Store message for timed display
+        st.session_state.timed_message_info = {
+            "message": f"Error during reindexing: {e}",
+            "type": "error",
+            "display_until": time.time() + 10 # Display errors for longer
+        }
         return False
     finally:
         st.session_state.is_reindexing = False
-        st.session_state.file_change_detected = False # Reset the flag after processing
+        st.session_state.reindex_required = False # Reset flag after successful re-indexing
 
+# --- Helper to display and clear timed messages ---
+def display_and_clear_timed_message():
+    message_info = st.session_state.timed_message_info
+    if message_info["message"] and time.time() < message_info["display_until"]:
+        if message_info["type"] == "info":
+            st.info(message_info["message"])
+        elif message_info["type"] == "warning":
+            st.warning(message_info["message"])
+        elif message_info["type"] == "error":
+            st.error(message_info["message"])
+        elif message_info["type"] == "success":
+            st.success(message_info["message"])
+    elif message_info["message"] and time.time() >= message_info["display_until"]:
+        # Clear the message if it has expired
+        st.session_state.timed_message_info = {"message": "", "type": "", "display_until": 0.0}
 
 # --- Main UI Logic ---
 
-def check_and_perform_reindexing_on_rerun():
-    """
-    Checks if reindexing is needed based on state flags and triggers it from the main thread.
-    This runs on every Streamlit rerun.
-    """
-    print(st.session_state.is_setup_complete)
-    print(st.session_state.documents_subdir_path)
-    if st.session_state.is_setup_complete and st.session_state.documents_subdir_path:
-        # Case 1: Initial indexing needs to be done after successful directory setup
-        print(st.session_state.initial_indexing_done)
-        print(st.session_state.file_change_detected)
-        print(st.session_state.is_reindexing)
+# Call the message displayer at the very top to ensure it's processed early
+display_and_clear_timed_message()
 
-        if not st.session_state.initial_indexing_done:
-            print("Performing initial indexing after setup on rerun...")
-            perform_reindexing()
-            st.session_state.initial_indexing_done = True
-            # No st.rerun() here; the current rerun cycle will complete and display results.
+# Check for initial indexing after setup
+if st.session_state.is_setup_complete and not st.session_state.initial_indexing_done:
+    print("Performing initial indexing after setup...")
+    perform_reindexing(source_trigger="initial_setup")
+    st.session_state.initial_indexing_done = True
+    st.rerun() # Rerun to show updated document list and disable process button correctly
 
-        # Case 2: File change detected by watchdog or manual button click
-        
-        elif st.session_state.file_change_detected and not st.session_state.is_reindexing:
-            print("File change detected and not currently reindexing. Triggering reindex.")
-            perform_reindexing()
-
-# Call the checker function at the top of the main UI logic.
-check_and_perform_reindexing_on_rerun()
+# Conditional Reindexing triggered by explicit button click
+# This block runs on every rerun. If reindex_required is True AND not already reindexing,
+# it means the manual "Re-index" button was clicked.
+if (st.session_state.is_setup_complete and 
+    st.session_state.documents_subdir_path and 
+    st.session_state.reindex_required and # Only reindex if this flag is set by manual button
+    not st.session_state.is_reindexing): # Prevent re-entry if already indexing
+    
+    print("Manual re-index requested and not currently reindexing. Triggering reindex.")
+    # Perform reindexing
+    success = perform_reindexing(source_trigger="manual_button")
+    if success:
+        # If reindexing was successful, trigger a full rerun to update the UI
+        # and clear the reindex_required flag (handled by perform_reindexing).
+        st.rerun()
 
 
 # Display reindexing status prominently
@@ -224,12 +241,17 @@ root_directory_input = st.text_input(
     disabled=st.session_state.is_reindexing # Disable input during reindexing
 )
 
-
 if st.button("Process Directory", disabled=st.session_state.is_reindexing):
     st.session_state.root_dir_input = root_directory_input # Update session state
 
     if not root_directory_input: # Handle empty input case for button click
-        st.error("Please enter a directory path.")
+        # Store message for timed display
+        st.session_state.timed_message_info = {
+            "message": "Please enter a directory path.",
+            "type": "error",
+            "display_until": time.time() + 5
+        }
+        st.rerun() # Rerun to display message
     else:
         root_path = Path(root_directory_input)
         documents_subdir_path = root_path / "documents" # The required 'documents' subdirectory
@@ -237,16 +259,28 @@ if st.button("Process Directory", disabled=st.session_state.is_reindexing):
 
         # 1. Validate the root directory
         if not root_path.is_dir():
-            st.error(f"Error: The provided path '{root_directory_input}' is not a valid directory.")
+            # Store message for timed display
+            st.session_state.timed_message_info = {
+                "message": f"Error: The provided path '{root_directory_input}' is not a valid directory.",
+                "type": "error",
+                "display_until": time.time() + 5
+            }
             st.session_state.is_setup_complete = False
             st.session_state.documents_list = [] # Clear document list
+            st.rerun() # Rerun to display message
         else:
             # 2. Validate the 'documents' subdirectory
             if not documents_subdir_path.is_dir():
-                st.error(f"Error: No 'documents' subdirectory found at '{documents_subdir_path}'. "
-                         "Please ensure your base directory contains a folder named 'documents' with your files.")
+                # Store message for timed display
+                st.session_state.timed_message_info = {
+                    "message": f"Error: No 'documents' subdirectory found at '{documents_subdir_path}'. "
+                               "Please ensure your base directory contains a folder named 'documents' with your files.",
+                    "type": "error",
+                    "display_until": time.time() + 10
+                }
                 st.session_state.is_setup_complete = False
                 st.session_state.documents_list = [] # Clear document list
+                st.rerun() # Rerun to display message
             else:
                 # Store the documents subdirectory path in session state for the event handler
                 st.session_state.documents_subdir_path = documents_subdir_path
@@ -254,22 +288,21 @@ if st.button("Process Directory", disabled=st.session_state.is_reindexing):
                 # 3. Check if 'documents' subdirectory has any files
                 current_files_info = get_documents_info(documents_subdir_path)
                 if not current_files_info: # Check if the list is empty
-                    st.warning(f"The 'documents' directory is empty. Add files and click 'Process Directory' again.")
+                    # Store message for timed display
+                    st.session_state.timed_message_info = {
+                        "message": f"The 'documents' directory is empty. Add files and click 'Process Directory' again.",
+                        "type": "warning",
+                        "display_until": time.time() + 7
+                    }
                     st.session_state.is_setup_complete = False
                     st.session_state.documents_list = [] # Clear document list
+                    st.rerun() # Rerun to display message
                 else:
                     st.success(f"Valid 'documents' directory found at: {documents_subdir_path}")
                     
                     # Setup directories
                     chroma_db_subdir_path.mkdir(parents=True, exist_ok=True)
                     st.info(f"ChromaDB will be stored in: {chroma_db_subdir_path}")
-
-                    # Stop existing observer
-                    if st.session_state.observer and st.session_state.observer.is_alive():
-                        st.session_state.observer.stop()
-                        st.session_state.observer.join()
-                        print("Stopped previous observer.")
-                        st.session_state.observer = None # Clear observer from session state
 
                     # Initialize DocumentProcessor
                     st.session_state.document_processor = DocumentProcessor(
@@ -278,20 +311,11 @@ if st.button("Process Directory", disabled=st.session_state.is_reindexing):
                     )
                     
                     st.session_state.is_setup_complete = True
-                    st.session_state.initial_indexing_done = False # Keep False so check_and_perform_reindexing_on_rerun handles it
-                                                                    # on the *next* rerun triggered by this button.
+                    st.session_state.initial_indexing_done = False # Will trigger initial indexing on next rerun
 
-                    # Start file watching (SmartDocumentEventHandler)
-                    event_handler = SmartDocumentEventHandler(documents_subdir_path)
-                    observer = Observer()
-                    observer.schedule(event_handler, str(documents_subdir_path), recursive=True)
-                    observer.start()
-                    st.session_state.observer = observer
-                    
-                    st.info(f"Monitoring '{documents_subdir_path}' for document changes...")
+                    st.info(f"Monitoring '{documents_subdir_path}' for document changes (manual re-index required).")
                     st.success("Setup complete! You can now ask questions.")
-                    # Force a rerun so that `check_and_perform_reindexing_on_rerun` runs for initial indexing
-                    st.rerun() 
+                    st.rerun() # Force a rerun to initiate the initial indexing via the top-level checker
 
 # Display Document List
 st.markdown("### Documents in Folder")
@@ -315,6 +339,42 @@ elif st.session_state.is_setup_complete: # Setup is complete but no files
 else:
     st.info("Select and process a directory above to see the list of documents.")
 
+# --- Manual Re-index Button with Notifications ---
+if st.session_state.is_setup_complete and not st.session_state.is_reindexing:
+    col_reindex, col_spacer = st.columns([0.3, 0.7]) # Adjust column width
+    with col_reindex:
+        if st.button("🔄 Re-index & Refresh", help="Re-index documents if changes are detected"):
+            current_path = Path(st.session_state.documents_subdir_path)
+            
+            # Check for changes before triggering full re-indexing
+            if has_directory_changed(current_path):
+                st.session_state.reindex_required = True # Flag that a re-index is needed
+                # Store message for timed display
+                st.session_state.timed_message_info = {
+                    "message": "Changes detected. Re-indexing will start shortly...",
+                    "type": "info",
+                    "display_until": time.time() + 5
+                }
+                st.rerun() # Trigger a rerun to execute perform_reindexing
+            else:
+                # No changes detected, check last re-index time
+                if time.time() - st.session_state.last_reindex_time < 30: # Within 30 seconds
+                    # Store message for timed display
+                    st.session_state.timed_message_info = {
+                        "message": "Index is already up-to-date and was recently re-indexed.",
+                        "type": "warning",
+                        "display_until": time.time() + 5
+                    }
+                else:
+                    # Store message for timed display
+                    st.session_state.timed_message_info = {
+                        "message": "No new file changes detected in the documents folder.",
+                        "type": "info",
+                        "display_until": time.time() + 5
+                    }
+                st.session_state.reindex_required = False # Ensure flag is false
+                st.rerun() # Rerun to display the message (even if no re-index happens)
+        
 # Chat Interface
 st.markdown("### 2. Ask Your Question")
 
@@ -377,26 +437,14 @@ else:
             with st.chat_message("assistant"):
                 st.error(error_msg)
 
-# Add manual refresh and clear chat buttons for user control
+# Add clear chat history button 
 if st.session_state.is_setup_complete:
     st.markdown("---")
     col1, col2 = st.columns([1, 1])
     with col1:
-        # A button to manually trigger re-indexing and UI refresh
-        # This button also manually sets file_change_detected and triggers a rerun.
-        if st.button("🔄 Force Re-index & Refresh UI", disabled=st.session_state.is_reindexing):
-            st.session_state.file_change_detected = True # Manually trigger the flag
-            st.rerun() # Force a rerun to pick up the flag
-    with col2:
         if st.button("🗑️ Clear Chat History"):
             st.session_state.chat_history = []
             st.rerun()
-
-# --- Automatic rerun for background updates ---
-if st.session_state.file_change_detected or (st.session_state.is_setup_complete and not st.session_state.initial_indexing_done):
-    # while also allowing Streamlit to process UI updates.
-    time.sleep(0.5) 
-    st.rerun()
 
 # Footer
 st.markdown("---")
