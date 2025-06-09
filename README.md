@@ -11,7 +11,7 @@ An exploratory alternative over cloud-based solutions in terms of privacy, secur
 - [License](#license)
     
 ## Run Locally
-- Requires uv (package and project manager)
+- Requires **uv** (package and project manager)
 - Requires to configure the .env variables. Copy the .example.env to .env.
 
 Clone the project
@@ -39,7 +39,7 @@ Start the server
 ```
 
 ## Features
-- In order to run a simple test, use the "test_dir" directory path.
+- In order to run a simple test, use the **test_dir** directory path.
 - Input a directory path. (It must have a documents sub-folder with the documents intended to query with the RAG)
 - Process the documents, generates embeddings and create a ChromaDB.
 - Query the documents through the RAG Chatbot.
@@ -50,8 +50,8 @@ Start the server
 ## Tech Stack
 
 - Streamlit for the web interface
-- BAAI/bge-small-en-v1.5 model for embeddings
-- microsoft/phi-2 as generative LLM.
+- **BAAI/bge-small-en-v1.5** model for embeddings
+- **microsoft/phi-2** as generative LLM.
 - LlamaIndex for the main logic
 - uv as the python dependencies manager.
 
