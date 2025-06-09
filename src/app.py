@@ -69,7 +69,7 @@ embed_model_instance = load_embedding_model()
 
 Settings.llm = llm_instance
 Settings.embed_model = embed_model_instance
-Settings.chunk_size = 256 # Set your desired chunk size here globally
+Settings.chunk_size = 256 # Set chunk size for document processing
 
 # --- Helper function to get document info and snapshot ---
 def get_documents_info(docs_path: Path):

@@ -39,6 +39,7 @@ Start the server
 ```
 
 ## Features
+- In order to run a simple test, use the "test_dir" directory path.
 - Input a directory path. (It must have a documents sub-folder with the documents intended to query with the RAG)
 - Process the documents, generates embeddings and create a ChromaDB.
 - Query the documents through the RAG Chatbot.
